@@ -1,67 +1,107 @@
-import cv2
 import numpy as np
-import os
+import cv2 as cv
 import glob
- 
-# Defining the dimensions of checkerboard
-CHECKERBOARD = (6,9)
-criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
- 
-# Creating vector to store vectors of 3D points for each checkerboard image
-objpoints = []
-# Creating vector to store vectors of 2D points for each checkerboard image
-imgpoints = [] 
- 
- 
-# Defining the world coordinates for 3D points
-objp = np.zeros((1, CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
-objp[0,:,:2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
-prev_img_shape = None
- 
-# Extracting path of individual image stored in a given directory
-images = glob.glob('./images/*.jpg')
-for fname in images:
-    img = cv2.imread(fname)
-    gray = cv2.cvtColor(img,cv2.COLOR_BGR2GRAY)
-    # Find the chess board corners
-    # If desired number of corners are found in the image then ret = true
-    ret, corners = cv2.findChessboardCorners(gray, CHECKERBOARD, cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK + cv2.CALIB_CB_NORMALIZE_IMAGE)
-     
-    """
-    If desired number of corner are detected,
-    we refine the pixel coordinates and display 
-    them on the images of checker board
-    """
+from matplotlib import pyplot as plt
+
+
+chessboardSize = (8,6)
+#frameSize = (1440,1080)
+frameSize = (1280,720)
+
+criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+
+objp = np.zeros((chessboardSize[0] * chessboardSize[1], 3), np.float32)
+objp[:,:2] = np.mgrid[0:chessboardSize[0], 0:chessboardSize[1]].T.reshape(-1,2)
+
+objPoints = []
+imgPoints = []
+
+images = glob.glob('*.jpg')
+
+for image in images:
+    print(image)
+    img = cv.imread(image)
+    gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
+
+    ret, corners = cv.findChessboardCorners(gray, chessboardSize, None)
+
     if ret == True:
-        objpoints.append(objp)
-        # refining pixel coordinates for given 2d points.
-        corners2 = cv2.cornerSubPix(gray, corners, (11,11),(-1,-1), criteria)
-         
-        imgpoints.append(corners2)
- 
-        # Draw and display the corners
-        img = cv2.drawChessboardCorners(img, CHECKERBOARD, corners2, ret)
-     
-    cv2.imshow('img',img)
-    cv2.waitKey(0)
- 
-cv2.destroyAllWindows()
- 
-h,w = img.shape[:2]
- 
-"""
-Performing camera calibration by 
-passing the value of known 3D points (objpoints)
-and corresponding pixel coordinates of the 
-detected corners (imgpoints)
-"""
-ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, gray.shape[::-1], None, None)
- 
-print("Camera matrix : \n")
-print(mtx)
-print("dist : \n")
-print(dist)
-print("rvecs : \n")
-print(rvecs)
-print("tvecs : \n")
-print(tvecs)
+        print("corners found in image\n")
+        objPoints.append(objp)
+        corners2 = cv.cornerSubPix(gray, corners, (11,11), (-1,-1), criteria)
+        imgPoints.append(corners)
+
+        cv.drawChessboardCorners(img, chessboardSize, corners, ret)
+        cv.imshow('img', img)
+        cv.waitKey(1000)
+
+
+cv.destroyAllWindows()
+
+
+#### calibration
+ret, cameraMatrix, dist, rvecs, tvecs = cv.calibrateCamera(objPoints, imgPoints, frameSize, None, None)
+
+print("Camera calibrated: ", ret)
+print("\nCamera Matrix:\n", cameraMatrix)
+print("\nDistorsion Parameters:\n", dist)
+print("\nRotation Vectors:\n", rvecs)
+print("\nTranslation Vectors:\n", tvecs)
+
+still_list = ["still1_L.jpg", "still2_R.jpg"]
+#still_list = ["nithar1_L.jpg", "nithar2_R.jpg"]
+
+for img in still_list:
+    ## generating undistored image
+    img_name = img
+    print("performing on {}\n".format(img))
+    img = cv.imread(img)
+    h, w = img.shape[:2]
+    newCameraMatrix, roi = cv.getOptimalNewCameraMatrix(cameraMatrix, dist, (w,h), 1, (w,h))
+
+    ### only undistort
+    dst = cv.undistort(img, cameraMatrix, dist, None, newCameraMatrix)
+    x, y, w, h = roi
+    dst = dst[y:y+h, x:x+w]
+    #cv.imwrite('img1result.jpg', dst)
+
+    ### undistort with remapping
+    mapx, mapy = cv.initUndistortRectifyMap(cameraMatrix, dist, None, newCameraMatrix, (w,h), 5)
+    dst = cv.remap(img, mapx, mapy, cv.INTER_LINEAR)
+    x, y, w, h = roi
+    dst = dst[y:y+h, x:x+w]
+    string_name = "remap_" + img_name
+    print(string_name)
+    print("\n")
+    cv.imwrite(string_name, dst)
+
+
+## error calculation
+mean_error = 0
+
+for i in range(len(objPoints)):
+    imgPoints2, _ = cv.projectPoints(objPoints[i], rvecs[i], tvecs[i], cameraMatrix, dist)
+    error = cv.norm(imgPoints[i], imgPoints2, cv.NORM_L2)/len(objPoints)
+    mean_error += error
+
+print("\ntotalerror: {}\n".format(mean_error/len(objPoints)))
+
+
+## depth map
+left_image = cv.imread('remap_{}'.format(still_list[0]), cv.IMREAD_GRAYSCALE)
+right_image = cv.imread('remap_{}'.format(still_list[1]), cv.IMREAD_GRAYSCALE)
+
+
+stereo = cv.StereoBM_create(numDisparities=80, blockSize=9)
+# For each pixel algorithm will find the best disparity from 0
+# Larger block size implies smoother, though less accurate disparity map
+depth = stereo.compute(left_image, right_image)
+
+print(depth)
+
+cv.imshow("Left", left_image)
+cv.imshow("right", right_image)
+
+plt.imshow(depth)
+plt.axis('off')
+plt.show()
