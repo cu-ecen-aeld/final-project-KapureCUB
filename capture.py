@@ -1,107 +1,156 @@
 import numpy as np
 import cv2 as cv
-import glob
-from matplotlib import pyplot as plt
+import os
+import socket
+import time
+import signal
+import sys
+
+######## CAMERA PARAMETERS ############
+cameraMatrix = np.array([[1.24658345e+03, 0.00000000e+00, 6.44698034e+02],
+                         [0.00000000e+00, 1.24438489e+03, 3.50116318e+02],
+                         [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]])
+
+distortionPara = np.array([0.15825909, -0.18346304, -0.03790805, -0.03332055, 0.04612853])
+stereoParameters = [80, 9]  # [numDisparities, blocksize]
+still_list = ["still1_L.ppm", "still2_R.ppm"]
+#######################################
+
+######## DRIVER PARAMETERS ############
+captureLeftCmd = "capture /dev/video2"
+captureRightCmd = "capture /dev/video0"
+copyFrame30Cmd = "cp fram00000030.ppm "
+renameStillLeft = "still1_L.ppm"
+renameStillRight = "still2_R.ppm"
+defaultDepthImage = 'depth.jpg'
+#######################################
+
+######## SOCKET PARAMETERS ############
+# configure these for socket connection based on server
+serverAddress = '10.0.0.46'
+serverPort = 1002
+imageChunkToSend = 2048
+#######################################
 
 
-chessboardSize = (8,6)
-#frameSize = (1440,1080)
-frameSize = (1280,720)
-
-criteria = (cv.TERM_CRITERIA_EPS + cv.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-
-objp = np.zeros((chessboardSize[0] * chessboardSize[1], 3), np.float32)
-objp[:,:2] = np.mgrid[0:chessboardSize[0], 0:chessboardSize[1]].T.reshape(-1,2)
-
-objPoints = []
-imgPoints = []
-
-images = glob.glob('*.jpg')
-
-for image in images:
-    print(image)
-    img = cv.imread(image)
-    gray = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
-
-    ret, corners = cv.findChessboardCorners(gray, chessboardSize, None)
-
-    if ret == True:
-        print("corners found in image\n")
-        objPoints.append(objp)
-        corners2 = cv.cornerSubPix(gray, corners, (11,11), (-1,-1), criteria)
-        imgPoints.append(corners)
-
-        cv.drawChessboardCorners(img, chessboardSize, corners, ret)
-        cv.imshow('img', img)
-        cv.waitKey(1000)
+########## SIGNAL HANDLERS ############
+def sigterm_handler(_signo, _stack_frame):
+    # Raises SystemExit(0):
+    sys.exit(-1)
 
 
-cv.destroyAllWindows()
+signal.signal(signal.SIGTERM, sigterm_handler)
+signal.signal(signal.SIGINT, sigterm_handler)
+#######################################
+
+# create a socket for transferring images to server
+client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)  # AF_INET = IP, SOCK_STREAM = TCP
+
+# connect to server
+print("Connecting to server..")
+client.connect((serverAddress, serverPort))
 
 
-#### calibration
-ret, cameraMatrix, dist, rvecs, tvecs = cv.calibrateCamera(objPoints, imgPoints, frameSize, None, None)
+class StereoVisionPi:
+    def __init__(self, images):
+        self.img_list = images
+        self.img_str_L = self.img_list[0]
+        self.img_str_R = self.img_list[1]
+        self.img_str = ""
+        self.height = ""
+        self.width = ""
+        self.newCameraMatrix = ""
+        self.roi = ""
+        self.mapx = ""
+        self.mapy = ""
+        self.distortion = ""
+        self.img = ""
+        self.abscissa = ""
+        self.ordinate = ""
+        self.leftImage = ""
+        self.rightImage = ""
+        self.stereo = ""
+        self.depth = ""
+        self.heatmap = ""
 
-print("Camera calibrated: ", ret)
-print("\nCamera Matrix:\n", cameraMatrix)
-print("\nDistorsion Parameters:\n", dist)
-print("\nRotation Vectors:\n", rvecs)
-print("\nTranslation Vectors:\n", tvecs)
+    def depth_map(self, leftimg, rightimg):
+        self.leftImage = cv.imread(leftimg, cv.IMREAD_GRAYSCALE)
+        self.rightImage = cv.imread(rightimg, cv.IMREAD_GRAYSCALE)
+        self.stereo = cv.StereoBM_create(numDisparities=stereoParameters[0], blockSize=stereoParameters[1])
+        self.depth = self.stereo.compute(self.leftImage, self.rightImage)
+        self.heatmap = cv.applyColorMap(self.depth, cv.COLORMAP_HOT)
 
-still_list = ["still1_L.jpg", "still2_R.jpg"]
-#still_list = ["nithar1_L.jpg", "nithar2_R.jpg"]
+        return self.heatmap
 
-for img in still_list:
-    ## generating undistored image
-    img_name = img
-    print("performing on {}\n".format(img))
-    img = cv.imread(img)
-    h, w = img.shape[:2]
-    newCameraMatrix, roi = cv.getOptimalNewCameraMatrix(cameraMatrix, dist, (w,h), 1, (w,h))
+    def perform_depth_mapping(self):
+        for self.img in self.img_list:
+            self.img_str = self.img
+            print("Performing rectification on {}".format(self.img_str))
+            self.img = cv.imread(self.img)
+            self.height, self.width = self.img.shape[:2]
+            self.newCameraMatrix, self.roi = cv.getOptimalNewCameraMatrix(cameraMatrix, distortionPara,
+                                                                          (self.width, self.height),
+                                                                          1, (self.width, self.height))
+            # un-distortion with remapping
+            self.mapx, self.mapy = cv.initUndistortRectifyMap(cameraMatrix, distortionPara, None, self.newCameraMatrix,
+                                                              (self.width, self.height), 5)
+            self.distortion = cv.remap(self.img, self.mapx, self.mapy, cv.INTER_LINEAR)
+            self.abscissa, self.ordinate, self.width, self.height = self.roi
+            self.distortion = self.distortion[self.ordinate:self.ordinate + self.height,
+                              self.abscissa:self.abscissa + self.width]
+            cv.imwrite(("remap_" + self.img_str), self.distortion)
 
-    ### only undistort
-    dst = cv.undistort(img, cameraMatrix, dist, None, newCameraMatrix)
-    x, y, w, h = roi
-    dst = dst[y:y+h, x:x+w]
-    #cv.imwrite('img1result.jpg', dst)
-
-    ### undistort with remapping
-    mapx, mapy = cv.initUndistortRectifyMap(cameraMatrix, dist, None, newCameraMatrix, (w,h), 5)
-    dst = cv.remap(img, mapx, mapy, cv.INTER_LINEAR)
-    x, y, w, h = roi
-    dst = dst[y:y+h, x:x+w]
-    string_name = "remap_" + img_name
-    print(string_name)
-    print("\n")
-    cv.imwrite(string_name, dst)
+        return self.depth_map(("remap_" + self.img_str_L), ("remap_" + self.img_str_R))
 
 
-## error calculation
-mean_error = 0
+imgObj = StereoVisionPi(still_list)
 
-for i in range(len(objPoints)):
-    imgPoints2, _ = cv.projectPoints(objPoints[i], rvecs[i], tvecs[i], cameraMatrix, dist)
-    error = cv.norm(imgPoints[i], imgPoints2, cv.NORM_L2)/len(objPoints)
-    mean_error += error
+#while True:
+try:
+    # call the capture command on camera R
+    ret = os.system(captureLeftCmd)
+    if ret == 0:
+        ret = os.system(copyFrame30Cmd + renameStillLeft)
+        if ret == 0:
+            # copy frame30 as R.img
+            ret = os.system(captureRightCmd)
+            if ret == 0:
+                ret = os.system(copyFrame30Cmd + renameStillRight)
+                if ret == 0:
+                    # perform depth estimation on rectified images
+                    depthMap = imgObj.perform_depth_mapping()
+                    cv.imwrite("depth.jpg", depthMap)
+                    print("Successfully created depth map")
 
-print("\ntotalerror: {}\n".format(mean_error/len(objPoints)))
+                    # send data via socket
+                    file = open(defaultDepthImage, 'rb')   # open in read binary mode
+                    image_data = file.read(imageChunkToSend)
+                    while image_data:
+                        try:
+                            client.send(image_data)
+                        except:
+                            print("Error sending image to server.")
+                            break
+                        image_data = file.read(imageChunkToSend)
+                    print("Image sent to server")
+                    file.close()
+                    time.sleep(1)
+                else:
+                    print("Error in saving right image")
+            else:
+                print("Error in calling capture on right camera")
+        else:
+            print("Error in saving left image")
+    else:
+        print("Error in calling capture on left camera")
+except:
+    client.close()
+    print("Error in computing depth capture")
+    #break
+
+finally:
+    client.close()
+    print("Keyboard interrupt. Exiting..")
+    #break
 
 
-## depth map
-left_image = cv.imread('remap_{}'.format(still_list[0]), cv.IMREAD_GRAYSCALE)
-right_image = cv.imread('remap_{}'.format(still_list[1]), cv.IMREAD_GRAYSCALE)
-
-
-stereo = cv.StereoBM_create(numDisparities=80, blockSize=9)
-# For each pixel algorithm will find the best disparity from 0
-# Larger block size implies smoother, though less accurate disparity map
-depth = stereo.compute(left_image, right_image)
-
-print(depth)
-
-cv.imshow("Left", left_image)
-cv.imshow("right", right_image)
-
-plt.imshow(depth)
-plt.axis('off')
-plt.show()
