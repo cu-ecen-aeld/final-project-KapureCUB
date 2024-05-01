@@ -12,7 +12,7 @@ cameraMatrix = np.array([[1.24658345e+03, 0.00000000e+00, 6.44698034e+02],
                          [0.00000000e+00, 0.00000000e+00, 1.00000000e+00]])
 
 distortionPara = np.array([0.15825909, -0.18346304, -0.03790805, -0.03332055, 0.04612853])
-stereoParameters = [80, 9]  # [numDisparities, blocksize]
+stereoParameters = [16, 9]  # [numDisparities, blocksize]
 still_list = ["still1_L.ppm", "still2_R.ppm"]
 #######################################
 
@@ -71,16 +71,13 @@ class StereoVisionPi:
         self.rightImage = ""
         self.stereo = ""
         self.depth = ""
-        self.heatmap = ""
 
     def depth_map(self, leftimg, rightimg):
         self.leftImage = cv.imread(leftimg, cv.IMREAD_GRAYSCALE)
         self.rightImage = cv.imread(rightimg, cv.IMREAD_GRAYSCALE)
         self.stereo = cv.StereoBM_create(numDisparities=stereoParameters[0], blockSize=stereoParameters[1])
         self.depth = self.stereo.compute(self.leftImage, self.rightImage)
-        self.heatmap = cv.applyColorMap(self.depth, cv.COLORMAP_HOT)
-
-        return self.heatmap
+        return self.depth
 
     def perform_depth_mapping(self):
         for self.img in self.img_list:
@@ -123,6 +120,34 @@ try:
                     print("Successfully created depth map")
 
                     # send data via socket
+                    file = open("remap_{}".format(renameStillLeft), 'rb')  # open in read binary mode
+                    image_data = file.read(imageChunkToSend)
+                    while image_data:
+                        try:
+                            client.send(image_data)
+                        except:
+                            print("Error sending image to server.")
+                            break
+                        image_data = file.read(imageChunkToSend)
+                    print("Image sent to server")
+                    file.close()
+
+                    time.sleep(10)
+
+                    file = open("remap_{}".format(renameStillRight), 'rb')  # open in read binary mode
+                    image_data = file.read(imageChunkToSend)
+                    while image_data:
+                        try:
+                            client.send(image_data)
+                        except:
+                            print("Error sending image to server.")
+                            break
+                        image_data = file.read(imageChunkToSend)
+                    print("Image sent to server")
+                    file.close()
+
+                    time.sleep(10)
+
                     file = open(defaultDepthImage, 'rb')   # open in read binary mode
                     image_data = file.read(imageChunkToSend)
                     while image_data:
@@ -152,5 +177,6 @@ finally:
     client.close()
     print("Keyboard interrupt. Exiting..")
     #break
+
 
 
